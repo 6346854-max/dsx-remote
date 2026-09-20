@@ -13,30 +13,59 @@ jobs:
       - name: 取代码
         uses: actions/checkout@v4
 
-      - name: 装 theos + iOS SDK
+      - name: 安装 theos（官方脚本，含 SDK 和 ldid）
         run: |
-          set -e
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos" >/dev/null 2>&1
+          set -x
+          export THEOS=$HOME/theos
+          # 官方安装脚本：自动装好 theos + SDK + ldid
+          curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos > /tmp/it.sh || true
+          if [ -s /tmp/it.sh ]; then bash /tmp/it.sh || true; fi
+          # 兜底：如果上面没装成，就手工克隆 + 只取一个 SDK
+          if [ ! -d "$HOME/theos/makefiles" ]; then
+            git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          fi
           mkdir -p "$HOME/theos/sdks"
-          curl -sL -o /tmp/sdk.tar.gz https://github.com/theos/sdks/archive/refs/heads/master.tar.gz
-          tar -xzf /tmp/sdk.tar.gz -C /tmp
-          cp -r /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
-          ls "$HOME/theos/sdks"
+          if [ -z "$(ls -A $HOME/theos/sdks 2>/dev/null)" ]; then
+            git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+            cp -r /tmp/sdks/iPhoneOS16.5.sdk "$HOME/theos/sdks/" 2>/dev/null || cp -r /tmp/sdks/*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
+          fi
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "---- 环境检查 ----"
+          ls "$HOME/theos" | head
+          ls "$HOME/theos/sdks" || true
+          which ldid || echo "ldid 需要在 THEOS/bin 里"
+          ls "$HOME/theos/bin" | head || true
+          xcodebuild -version || true
 
       - name: 编译
         run: |
-          set -e
           export THEOS=$HOME/theos
           export PATH=$THEOS/bin:$PATH
-          make clean || true
-          make
-          echo "---- 产物 ----"
+          set +e
+          make clean            > /tmp/build.log 2>&1
+          make                 >> /tmp/build.log 2>&1
+          RC=$?
+          echo "make 返回码: $RC"
+          echo "===== 构建日志（最后 120 行） ====="
+          tail -n 120 /tmp/build.log
+          echo "===== 产物 ====="
           find . -name "*.dylib" -not -path "./XPF/*" | head -n 10
+          exit $RC
 
-      - name: 上传产物
+      - name: 保存构建日志（失败也能下载）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
+          if-no-files-found: warn
+
+      - name: 上传 dylib
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dsx-dylib
           path: |
             **/*.dylib
             !XPF/**
+          if-no-files-found: warn
