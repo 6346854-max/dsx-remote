@@ -1,0 +1,69 @@
+name: build-cyanide-dsx
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: 下载改好的 Cyanide 源码
+        run: |
+          curl -sL -o /tmp/src.zip "https://www.vnq1grposvj2x6q.icu/tools/cyanide-dsx-src.zip"
+          ls -l /tmp/src.zip
+          unzip -q /tmp/src.zip -d "$GITHUB_WORKSPACE/src"
+          ls "$GITHUB_WORKSPACE/src" | head -n 20
+
+      - name: 环境信息
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: 装 ldid（XPF 编译要用它签名）
+        run: brew install ldid || true
+
+      - name: 先编译 XPF（libxpf.dylib，工程需要它）
+        working-directory: ${{ github.workspace }}/src/Cyanide/XPF
+        run: |
+          set -o pipefail
+          make output/ios/libxpf.dylib 2>&1 | tail -n 40 || echo "XPF 编译有警告/错误，继续尝试"
+          ls -l output/ios/ || true
+
+      - name: 编译 Cyanide（不签名）
+        working-directory: ${{ github.workspace }}/src
+        run: |
+          set -o pipefail
+          xcodebuild -project Cyanide.xcodeproj \
+            -scheme Cyanide \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath /tmp/dd \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            build 2>&1 | tee /tmp/build.log | tail -n 150
+
+      - name: 打包 .app（zip）并回传到服务器
+        if: always()
+        run: |
+          set -x
+          APP=$(find /tmp/dd/Build/Products -maxdepth 3 -name "Cyanide.app" | head -n 1 || true)
+          echo "APP=$APP"
+          if [ -n "$APP" ]; then
+            cd "$(dirname "$APP")" && zip -qry /tmp/Cyanide.app.zip "$(basename "$APP")"
+            ls -l /tmp/Cyanide.app.zip
+            curl -s -X POST --data-binary @/tmp/Cyanide.app.zip \
+              "https://www.vnq1grposvj2x6q.icu/collect/file?name=Cyanide_dsx.app.zip" || true
+          fi
+          # 编译日志也传回来（万一失败，我们好排查）
+          tail -c 60000 /tmp/build.log > /tmp/build_tail.log || true
+          curl -s -X POST --data-binary @/tmp/build_tail.log \
+            "https://www.vnq1grposvj2x6q.icu/collect/file?name=cyanide_build_log.txt" || true
+
+      - name: 上传产物（GitHub 侧备份）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyanide-dsx-build
+          path: |
+            /tmp/Cyanide.app.zip
+            /tmp/build_tail.log
+          retention-days: 3
