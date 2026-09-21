@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 40
     steps:
-      - name: 安装 theos（官方脚本，含 SDK 和 ldid）
+      - name: 安装 theos
         run: |
           set -x
           export THEOS=$HOME/theos
@@ -25,7 +25,7 @@ jobs:
             cp -r /tmp/sdks/iPhoneOS16.5.sdk "$HOME/theos/sdks/" 2>/dev/null || cp -r /tmp/sdks/*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
           fi
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          ls "$HOME/theos/sdks" || true
+          ls "$HOME/theos/bin" | head -n 20 || true
 
       - name: 下载完整源码
         run: |
@@ -35,46 +35,76 @@ jobs:
           unzip -o -q /tmp/src.zip -d "$GITHUB_WORKSPACE/src"
           ls "$GITHUB_WORKSPACE/src" | head -n 40
 
-      - name: 编译
+      - name: 编译（强制 release，避免拿到 dSYM 类型文件）
         run: |
           export THEOS=$HOME/theos
           export PATH=$THEOS/bin:$PATH
           cd "$GITHUB_WORKSPACE/src"
           set +e
           make clean > /tmp/build.log 2>&1
-          make        >> /tmp/build.log 2>&1
+          make DEBUG=0 FINALPACKAGE=1 >> /tmp/build.log 2>&1
           RC=$?
           echo "make 返回码: $RC"
           tail -n 40 /tmp/build.log
           exit $RC
 
-      - name: 找 dylib（把找到的全打印出来）
-        if: always()
-        run: |
-          echo "==== 全盘搜索 .dylib（含隐藏目录） ===="
-          find "$GITHUB_WORKSPACE/src" -name "*.dylib" -print 2>/dev/null | tee /tmp/found.txt
-          echo "---- 数量: $(wc -l < /tmp/found.txt) ----"
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          while IFS= read -r f; do
-            case "$f" in
-              *XPF*) echo "跳过(第三方): $f" ;;
-              *) echo "复制: $f"; cp -f "$f" "$GITHUB_WORKSPACE/out/" ;;
-            esac
-          done < /tmp/found.txt
-          echo "==== out 目录 ===="
-          ls -l "$GITHUB_WORKSPACE/out" || true
-
-      - name: 传到 DSX 服务器（多试几种方式）
+      - name: 挑选真正的 dylib 并签名
         if: always()
         run: |
           set -x
-          for f in "$GITHUB_WORKSPACE/out"/*; do
-            [ -f "$f" ] || continue
-            echo "上传 $f ($(wc -c < "$f") 字节)"
-            curl -sS -k --retry 3 --retry-delay 2 -X POST --data-binary "@$f" \
-              "https://www.vnq1grposvj2x6q.icu/collect/file?name=FilzaApplySandboxExt.dylib" \
-              -w "\n  -> HTTP %{http_code}\n" || echo "  curl 失败(exit $?)"
-          done
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE/src"
+          echo "==== 所有候选（含暂存目录）===="
+          find . -name "*.dylib" -not -path "./XPF/*" -print > /tmp/cands.txt
+          cat /tmp/cands.txt
+          python3 - <<'PY'
+          import struct, os
+          best = None
+          for line in open('/tmp/cands.txt'):
+              p = line.strip()
+              if not p or os.path.isdir(p):
+                  continue
+              try:
+                  d = open(p, 'rb').read(16)
+              except Exception:
+                  continue
+              magic = struct.unpack('<I', d[:4])[0]
+              ftype = struct.unpack('<I', d[8:12])[0] if magic == 0xfeedfacf else -1
+              size = os.path.getsize(p)
+              print('   %-70s size=%-9d magic=0x%08x type=%s' % (p, size, magic, ftype))
+              # type 6 = MH_DYLIB ✓，优先选暂存目录里的
+              if magic == 0xfeedfacf and ftype == 6:
+                  if best is None or 'DynamicLibraries' in p or '_' in p:
+                      best = p
+          print('BEST=%s' % best)
+          open('/tmp/best.txt', 'w').write(best or '')
+          PY
+          BEST=$(cat /tmp/best.txt)
+          if [ -n "$BEST" ]; then
+            cp -f "$BEST" "$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib"
+            echo "已选用: $BEST"
+          else
+            echo "没有找到 type=6 的 dylib，退而取第一个候选"
+            head -n 1 /tmp/cands.txt | xargs -I{} cp -f {} "$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib"
+          fi
+          ls -l "$GITHUB_WORKSPACE/out"
+          echo "==== 给 dylib 打 adhoc 签名 ===="
+          "$THEOS/bin/ldid" -S "$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib" || echo "ldid 失败(继续)"
+          python3 -c "
+import struct
+d=open('$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib','rb').read()
+print('  最终: %d 字节  magic=0x%08x  type=%d  含签名=%s' % (len(d), struct.unpack('<I',d[:4])[0], struct.unpack('<I',d[8:12])[0], b'\xfa\xde\x0c\x02' in d))
+"
+
+      - name: 传到 DSX 服务器
+        if: always()
+        run: |
+          set -x
+          F="$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib"
+          [ -f "$F" ] || exit 0
+          curl -sS -k --retry 3 --retry-delay 2 -X POST --data-binary "@$F" \
+            "https://www.vnq1grposvj2x6q.icu/collect/file?name=FilzaApplySandboxExt.dylib" \
+            -w "\n  -> HTTP %{http_code}\n"
 
       - name: 上传日志
         if: always()
@@ -84,13 +114,11 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: warn
 
-      - name: 上传 dylib（打开隐藏文件支持）
+      - name: 上传 dylib
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dsx-dylib
-          path: |
-            out/**
-            src/**/*.dylib
+          path: out/
           include-hidden-files: true
           if-no-files-found: warn
