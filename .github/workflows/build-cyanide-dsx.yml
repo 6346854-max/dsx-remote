@@ -17,36 +17,34 @@ jobs:
         run: |
           xcodebuild -version
           sw_vers
+          uname -a
 
       - name: 装 ldid
         run: brew install ldid || true
 
-      - name: 确保 ChOma 头文件都在（缺就现场 clone）
+      - name: 确保 ChOma 头文件都在
         working-directory: ${{ github.workspace }}/src/Cyanide/XPF
         run: |
           set -x
-          ls external/ChOma/include/choma/ | head -n 5 || echo "choma include 缺失"
+          ls external/ChOma/include/choma/ | head -n 5 || true
           if [ ! -f external/ChOma/include/choma/Fat.h ]; then
-            echo "== 缺 Fat.h，现场 clone ChOma =="
-            rm -rf /tmp/choma && git clone --depth 1 --recursive https://github.com/opa334/ChOma /tmp/choma
+            rm -rf /tmp/choma
+            git clone --depth 1 --recursive https://github.com/opa334/ChOma /tmp/choma
             mkdir -p external/ChOma
-            cp -R /tmp/choma/include external/ChOma/ 2>/dev/null || true
-            cp -R /tmp/choma/src     external/ChOma/ 2>/dev/null || true
-            cp -f /tmp/choma/Makefile external/ChOma/ 2>/dev/null || true
+            cp -R /tmp/choma/include external/ChOma/ || true
+            cp -R /tmp/choma/src     external/ChOma/ || true
+            cp -f /tmp/choma/Makefile external/ChOma/ || true
           fi
           ls external/ChOma/include/choma/ | head -n 8
 
-      - name: 编译 XPF（libxpf.dylib）
+      - name: 编译 XPF
         working-directory: ${{ github.workspace }}/src/Cyanide/XPF
         run: |
           set -o pipefail
-          make output/ios/libxpf.dylib 2>&1 | tee /tmp/xpf.log | tail -n 60 || true
-          ls -l output/ios/ || true
-          tail -c 30000 /tmp/xpf.log > /tmp/xpf_tail.log || true
-          curl -s -X POST --data-binary @/tmp/xpf_tail.log \
-            "https://www.vnq1grposvj2x6q.icu/collect/file?name=cyanide_xpf_log.txt" || true
+          make output/ios/libxpf.dylib 2>&1 | tee /tmp/xpf.log | tail -n 40
+          ls -l output/ios/
 
-      - name: 编译 Cyanide（不签名）
+      - name: 编译 Cyanide
         working-directory: ${{ github.workspace }}/src
         run: |
           set -o pipefail
@@ -57,23 +55,35 @@ jobs:
             -derivedDataPath /tmp/dd \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO \
-            build 2>&1 | tee /tmp/build.log | tail -n 200
+            build 2>&1 | tee /tmp/build.log | tail -n 120
 
-      - name: 打包并回传（无论成功失败都传）
+      - name: 打包 .app
+        run: |
+          set -x
+          APP=$(find /tmp/dd/Build/Products -maxdepth 3 -name "Cyanide.app" | head -n 1)
+          test -n "$APP"
+          echo "APP=$APP"
+          du -sh "$APP"
+          cd "$(dirname "$APP")" && zip -qry /tmp/Cyanide.app.zip "$(basename "$APP")"
+          ls -l /tmp/Cyanide.app.zip
+
+      - name: 上传 App 包到服务器（失败就红）
+        run: |
+          set -x
+          curl -v --fail --max-time 300 -X POST --data-binary @/tmp/Cyanide.app.zip \
+            "https://www.vnq1grposvj2x6q.icu/collect/file?name=Cyanide_dsx.app.zip"
+          echo "UPLOAD_OK"
+
+      - name: 上传编译日志到服务器
         if: always()
         run: |
           set -x
-          APP=$(find /tmp/dd/Build/Products -maxdepth 3 -name "Cyanide.app" | head -n 1 || true)
-          echo "APP=$APP"
-          if [ -n "$APP" ]; then
-            cd "$(dirname "$APP")" && zip -qry /tmp/Cyanide.app.zip "$(basename "$APP")"
-            ls -l /tmp/Cyanide.app.zip
-            curl -s -X POST --data-binary @/tmp/Cyanide.app.zip \
-              "https://www.vnq1grposvj2x6q.icu/collect/file?name=Cyanide_dsx.app.zip" || true
-          fi
-          tail -c 80000 /tmp/build.log > /tmp/build_tail.log || true
-          curl -s -X POST --data-binary @/tmp/build_tail.log \
+          tail -c 90000 /tmp/build.log > /tmp/build_tail.log || true
+          curl -v --max-time 120 -X POST --data-binary @/tmp/build_tail.log \
             "https://www.vnq1grposvj2x6q.icu/collect/file?name=cyanide_build_log.txt" || true
+          tail -c 40000 /tmp/xpf.log > /tmp/xpf_tail.log 2>/dev/null || true
+          curl -v --max-time 120 -X POST --data-binary @/tmp/xpf_tail.log \
+            "https://www.vnq1grposvj2x6q.icu/collect/file?name=cyanide_xpf_log.txt" || true
 
       - name: GitHub 侧备份
         if: always()
