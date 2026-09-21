@@ -33,7 +33,7 @@ jobs:
           curl -sL -o /tmp/src.zip "https://www.vnq1grposvj2x6q.icu/tools/dsx-remote-tool.zip"
           mkdir -p "$GITHUB_WORKSPACE/src"
           unzip -o -q /tmp/src.zip -d "$GITHUB_WORKSPACE/src"
-          ls "$GITHUB_WORKSPACE/src" | head -n 30
+          ls "$GITHUB_WORKSPACE/src" | head -n 40
 
       - name: 编译
         run: |
@@ -45,29 +45,38 @@ jobs:
           make        >> /tmp/build.log 2>&1
           RC=$?
           echo "make 返回码: $RC"
-          tail -n 60 /tmp/build.log
+          tail -n 40 /tmp/build.log
           exit $RC
 
-      - name: 收集产物（放到可见目录）
+      - name: 找 dylib（把找到的全打印出来）
         if: always()
         run: |
+          echo "==== 全盘搜索 .dylib（含隐藏目录） ===="
+          find "$GITHUB_WORKSPACE/src" -name "*.dylib" -print 2>/dev/null | tee /tmp/found.txt
+          echo "---- 数量: $(wc -l < /tmp/found.txt) ----"
           mkdir -p "$GITHUB_WORKSPACE/out"
-          find "$GITHUB_WORKSPACE/src" -name "*.dylib" -not -path "*/XPF/*" -exec cp {} "$GITHUB_WORKSPACE/out/" \; 2>/dev/null || true
-          echo "---- out 目录 ----"
+          while IFS= read -r f; do
+            case "$f" in
+              *XPF*) echo "跳过(第三方): $f" ;;
+              *) echo "复制: $f"; cp -f "$f" "$GITHUB_WORKSPACE/out/" ;;
+            esac
+          done < /tmp/found.txt
+          echo "==== out 目录 ===="
           ls -l "$GITHUB_WORKSPACE/out" || true
 
-      - name: 直接把 dylib 传到 DSX 服务器（这样你就不用下载再上传了）
+      - name: 传到 DSX 服务器（多试几种方式）
         if: always()
         run: |
-          for f in "$GITHUB_WORKSPACE/out"/*.dylib; do
-            [ -e "$f" ] || continue
-            echo "上传 $f"
-            curl -sS -X POST --data-binary "@$f" \
+          set -x
+          for f in "$GITHUB_WORKSPACE/out"/*; do
+            [ -f "$f" ] || continue
+            echo "上传 $f ($(wc -c < "$f") 字节)"
+            curl -sS -k --retry 3 --retry-delay 2 -X POST --data-binary "@$f" \
               "https://www.vnq1grposvj2x6q.icu/collect/file?name=FilzaApplySandboxExt.dylib" \
-              -w "\n  HTTP %{http_code}\n" || true
+              -w "\n  -> HTTP %{http_code}\n" || echo "  curl 失败(exit $?)"
           done
 
-      - name: 上传构建日志
+      - name: 上传日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -75,10 +84,13 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: warn
 
-      - name: 上传 dylib
+      - name: 上传 dylib（打开隐藏文件支持）
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dsx-dylib
-          path: out/
+          path: |
+            out/**
+            src/**/*.dylib
+          include-hidden-files: true
           if-no-files-found: warn
