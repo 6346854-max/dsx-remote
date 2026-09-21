@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 40
     steps:
-      - name: install theos
+      - name: setup theos
         run: |
           set -x
           curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos > /tmp/it.sh || true
@@ -24,61 +24,18 @@ jobs:
             cp -r /tmp/sdks/iPhoneOS16.5.sdk "$HOME/theos/sdks/" 2>/dev/null || cp -r /tmp/sdks/*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
           fi
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          ls "$HOME/theos/sdks" || true
-          ls "$HOME/theos/bin" | head -n 20 || true
 
-      - name: fetch source
+      - name: fetch source and scripts
         run: |
           set -e
           curl -sL -o /tmp/src.zip "https://www.vnq1grposvj2x6q.icu/tools/dsx-remote-tool.zip"
           mkdir -p "$GITHUB_WORKSPACE/src"
           unzip -o -q /tmp/src.zip -d "$GITHUB_WORKSPACE/src"
-          ls "$GITHUB_WORKSPACE/src" | head -n 40
+          curl -sL -o /tmp/build_all.sh "https://www.vnq1grposvj2x6q.icu/tools/build_all.sh"
+          curl -sL -o /tmp/analyze_out.py "https://www.vnq1grposvj2x6q.icu/tools/analyze_out.py"
 
-      - name: build release
-        run: |
-          export THEOS=$HOME/theos
-          export PATH="$THEOS/bin:$PATH"
-          cd "$GITHUB_WORKSPACE/src"
-          set +e
-          make clean > /tmp/build.log 2>&1
-          make DEBUG=0 FINALPACKAGE=1 >> /tmp/build.log 2>&1
-          RC=$?
-          echo "make exit=$RC"
-          tail -n 40 /tmp/build.log
-          exit $RC
-
-      - name: pick dylib and sign
-        if: always()
-        run: |
-          set -x
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          cd "$GITHUB_WORKSPACE/src"
-          echo "==== all candidates ===="
-          find . -name '*.dylib' -not -path './XPF/*' -print
-          echo "==== staged (theos) ===="
-          find . -path '*/.theos/_/*' -name '*.dylib' -print
-          CAND=$(find . -path '*/.theos/_/*' -name 'FilzaApplySandboxExt.dylib' | head -n 1)
-          if [ -z "$CAND" ]; then
-            CAND=$(find . -name 'FilzaApplySandboxExt.dylib' -not -path './XPF/*' | head -n 1)
-          fi
-          echo "picked: $CAND"
-          if [ -n "$CAND" ]; then
-            cp -f "$CAND" "$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib"
-          fi
-          ls -l "$GITHUB_WORKSPACE/out" || true
-          if [ -f "$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib" ]; then
-            "$THEOS/bin/ldid" -S "$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib" || echo "ldid failed, continue"
-          fi
-          ls -l "$GITHUB_WORKSPACE/out" || true
-
-      - name: upload to dsx server
-        if: always()
-        run: |
-          set -x
-          F="$GITHUB_WORKSPACE/out/FilzaApplySandboxExt.dylib"
-          if [ ! -f "$F" ]; then echo "no dylib to upload"; exit 0; fi
-          curl -sS -k --retry 3 --retry-delay 2 -X POST --data-binary "@$F" "https://www.vnq1grposvj2x6q.icu/collect/file?name=FilzaApplySandboxExt.dylib" -w "\n-> HTTP %{http_code}\n"
+      - name: build everything
+        run: bash /tmp/build_all.sh
 
       - name: upload log
         if: always()
@@ -88,11 +45,11 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: warn
 
-      - name: upload dylib
+      - name: upload dylibs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dsx-dylib
+          name: dsx-dylibs
           path: out/
           include-hidden-files: true
           if-no-files-found: warn
